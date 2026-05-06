@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <AssemblyName>Pedal Juno106.NET</AssemblyName>
+    <RootNamespace>PedalJuno106</RootNamespace>
+    <OutputType>Library</OutputType>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+
+    <!-- Build hygiene per Notes_Build §1.2 — ReBuzz only loads the .dll, so
+         suppress .pdb and .deps.json to keep the gear folder clean. -->
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+
+    <!-- Suppress the harmless WindowsBase / VisualBasic / System.Drawing
+         version-conflict warnings caused by ReBuzz shipping older framework
+         DLLs (Notes_Build §4). -->
+    <NoWarn>MSB3277</NoWarn>
+
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <!-- Adjust ReBuzzPath if your install lives elsewhere. -->
+  <PropertyGroup>
+    <ReBuzzPath>C:\Program Files\ReBuzz</ReBuzzPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="BuzzGUI.Interfaces">
+      <HintPath>$(ReBuzzPath)\BuzzGUI.Interfaces.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- gen_presets.py is a maintenance script, not a build input. Exclude it
+       so MSBuild doesn't trip if a future SDK starts auto-globbing .py files. -->
+  <ItemGroup>
+    <None Remove="gen_presets.py" />
+  </ItemGroup>
+
+  <!-- Auto-deploy the .dll and the preset bundle to ReBuzz\Gear\Generators
+       after build. ContinueOnError keeps the build green if ReBuzz is
+       currently running and has the file locked. The preset Copy is
+       conditional so the build doesn't fail if you haven't run the
+       generator script yet. -->
+  <Target Name="DeployToReBuzz" AfterTargets="Build">
+    <Copy SourceFiles="$(TargetPath)"
+          DestinationFolder="$(ReBuzzPath)\Gear\Generators"
+          ContinueOnError="true" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\Pedal Juno106_Presets.prs.xml"
+          DestinationFolder="$(ReBuzzPath)\Gear\Generators"
+          ContinueOnError="true"
+          Condition="Exists('$(MSBuildProjectDirectory)\Pedal Juno106_Presets.prs.xml')" />
+  </Target>
+
+</Project>
