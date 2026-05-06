@@ -12,6 +12,10 @@ namespace PedalJuno106
     /// Mode I:   ~0.51 Hz, 1.92 ms — slow, lush
     /// Mode II:  ~0.86 Hz, 1.92 ms — denser
     /// Mode III: ~9.91 Hz, 0.18 ms — iconic Juno warble (very fast, very tiny)
+    ///
+    /// Configure(mode) caches mode-dependent coefficients once per Work()
+    /// block; Process(input) is the per-sample hot path with no mode
+    /// switching.
     /// </summary>
     internal sealed class Chorus
     {
@@ -32,9 +36,19 @@ namespace PedalJuno106
         float _preLpf;
         float _postLpfL, _postLpfR;
 
+        // Mode-dependent values cached by Configure().
+        // _lfoInc and _depthSamp depend on _sr too, so SetSampleRate must
+        // invalidate _cachedMode to force a re-cache.
+        int   _cachedMode = -1;
+        bool  _isOn;
+        float _lfoInc;          // rate · invSr     (LFO phase increment / sample)
+        float _depthSamp;       // depthMs · sr · 0.001  (modulation depth in samples)
+        float _centerSamp;      // CenterDelayMs · sr · 0.001  (centre delay in samples)
+
         public Chorus()
         {
             UpdateBbdCoef();
+            _centerSamp = CenterDelayMs * _sr * 0.001f;
         }
 
         public void SetSampleRate(float sr)
@@ -42,6 +56,8 @@ namespace PedalJuno106
             _sr = sr;
             _invSr = 1f / sr;
             UpdateBbdCoef();
+            _centerSamp = CenterDelayMs * _sr * 0.001f;
+            _cachedMode = -1;       // _lfoInc / _depthSamp depend on sr — re-cache
         }
 
         void UpdateBbdCoef()
@@ -60,25 +76,45 @@ namespace PedalJuno106
         }
 
         /// <summary>
-        /// Process one mono input sample, output stereo.
-        ///   mode: 0=Off, 1=I, 2=II, 3=III
+        /// Set chorus mode. Cheap when mode hasn't changed. Caches the
+        /// mode-dependent rate→increment and depth→samples conversions so
+        /// the per-sample Process loop has no mode switching.
+        /// Call once per Work() block, before the per-sample Process loop.
         /// </summary>
-        public void Process(int mode, float input, ref float outL, ref float outR)
+        public void Configure(int mode)
         {
+            if (mode == _cachedMode) return;
+            _cachedMode = mode;
+
             if (mode <= 0)
             {
-                outL = input;
-                outR = input;
+                _isOn = false;
                 return;
             }
+            _isOn = true;
 
-            // Mode-dependent rate and depth
             float rate, depthMs;
             switch (mode)
             {
                 case 1:  rate = 0.513f; depthMs = 1.92f; break;
                 case 2:  rate = 0.863f; depthMs = 1.92f; break;
                 default: rate = 9.91f;  depthMs = 0.18f; break;   // mode 3
+            }
+            _lfoInc    = rate * _invSr;
+            _depthSamp = depthMs * _sr * 0.001f;
+        }
+
+        /// <summary>
+        /// Process one mono input sample, output stereo. Uses the mode last
+        /// passed to Configure().
+        /// </summary>
+        public void Process(float input, ref float outL, ref float outR)
+        {
+            if (!_isOn)
+            {
+                outL = input;
+                outR = input;
+                return;
             }
 
             // Pre-LPF (BBD bandwidth)
@@ -88,16 +124,14 @@ namespace PedalJuno106
             _delayL[_writeIdx] = _preLpf;
             _delayR[_writeIdx] = _preLpf;
 
-            // Advance LFO
-            _lfoPhase += rate * _invSr;
+            // Advance LFO (cached _lfoInc — no rate/sr math per sample)
+            _lfoPhase += _lfoInc;
             if (_lfoPhase >= 1f) _lfoPhase -= 1f;
             float lfo = MathF.Sin(2f * MathF.PI * _lfoPhase);
 
-            // Anti-phase modulation: L = center + depth·lfo, R = center − depth·lfo
-            float depthSamp  = depthMs * _sr * 0.001f;
-            float centerSamp = CenterDelayMs * _sr * 0.001f;
-            float dL = centerSamp + depthSamp * lfo;
-            float dR = centerSamp - depthSamp * lfo;
+            // Anti-phase modulation: L = centre + depth·lfo, R = centre − depth·lfo
+            float dL = _centerSamp + _depthSamp * lfo;
+            float dR = _centerSamp - _depthSamp * lfo;
 
             float wetL = ReadDelay(_delayL, dL);
             float wetR = ReadDelay(_delayR, dR);

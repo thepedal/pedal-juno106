@@ -10,7 +10,8 @@ namespace PedalJuno106
     ///   Position 3: ~400 Hz
     ///
     /// One-pole HPF implemented as input − lowpass-tracker.
-    /// Coefficient cached and recomputed only on position change.
+    /// Configure(position) is called once per Work() block; ProcessMono(input)
+    /// is the per-sample hot path and just runs the filter math.
     /// </summary>
     internal sealed class Hpf
     {
@@ -21,11 +22,12 @@ namespace PedalJuno106
         float _coef;
         float _sr = 44100f;
         int   _lastPosition = -1;
+        bool  _isOn;
 
         public void SetSampleRate(float sr)
         {
             _sr = sr;
-            _lastPosition = -1;   // force recompute
+            _lastPosition = -1;     // force recompute on next Configure
         }
 
         public void Reset()
@@ -34,29 +36,34 @@ namespace PedalJuno106
             _lastPosition = -1;
         }
 
-        void UpdateCoefficient(int position)
+        /// <summary>
+        /// Set cutoff position. Cheap when position hasn't changed.
+        /// Call once per Work() block, before the per-sample ProcessMono loop.
+        /// </summary>
+        public void Configure(int position)
         {
             if (position == _lastPosition) return;
             _lastPosition = position;
-            if (position <= 0)
+
+            if (position <= 0 || position >= _cutoffs.Length)
             {
-                _coef = 0f;
-                _z = 0f;
+                _isOn = false;
+                _z = 0f;            // clear state when bypassed
                 return;
             }
+            _isOn = true;
             float fc = _cutoffs[position];
-            // Lowpass-tracking coefficient: alpha = 1 - exp(-2π·fc/sr)
+            // Lowpass-tracker α = 1 − exp(−2π·fc/sr). HPF output = input − lp.
             _coef = 1f - MathF.Exp(-2f * MathF.PI * fc / _sr);
         }
 
         /// <summary>
-        /// Process one mono sample.
-        /// position: 0..3 (panel parameter). 0 = bypass.
+        /// Process one mono sample using the configured position.
+        /// Returns input unchanged when bypassed.
         /// </summary>
-        public float ProcessMono(int position, float input)
+        public float ProcessMono(float input)
         {
-            if (position != _lastPosition) UpdateCoefficient(position);
-            if (position == 0) return input;
+            if (!_isOn) return input;
             _z += _coef * (input - _z);
             return input - _z;
         }

@@ -132,8 +132,22 @@ later when GUI work begins.
 
 **Filter** — TPT 4-pole ladder LPF. Soft-clip (`SoftClip(input − k·z4)`)
 in the feedback path bounds self-oscillation cleanly at high resonance.
-Coefficient G recomputed only when fc changes by >0.5 Hz — keeps cost
-stable under envelope/LFO modulation.
+Coefficient G is recomputed at most every 16 samples (~0.36 ms at
+44.1 kHz) — and only when fc has actually moved by ≥0.5 Hz. Skips
+~94% of FastTan calls under per-sample modulation; sub-audio update
+rate so no zipper artefacts.
+
+**Cutoff clamp** — explicit clamp in the work loop bounds the modulated
+cutoff to `[20 Hz, 0.45·sr]` before the filter call. Filter still has
+its own internal clamp inside the decimated G-update block as a
+defensive backstop, but the work-loop clamp is the primary one.
+
+**HPF / Chorus** — both use a `Configure(...)` call once per Work()
+block to cache mode/position-dependent coefficients (HPF: filter coef
+from the 4-position table; Chorus: `_lfoInc`, `_depthSamp`, `_centerSamp`
+from the mode's rate and depth). The per-sample `ProcessMono` /
+`Process` paths have no switch-on-mode logic. `SetSampleRate`
+invalidates the cache so SR changes pick up new coefficients.
 
 **Envelope** — ADSR. Linear attack, exponential decay/release toward
 target. Full retrigger (Level → 0 on note-on). Coefficients cached

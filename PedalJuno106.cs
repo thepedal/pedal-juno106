@@ -285,6 +285,20 @@ namespace PedalJuno106
             int   lfoDelayL = LfoDelay;
             float srf       = sr;
 
+            // Cutoff clamp range — applied per-sample to the modulated cutoff
+            // before passing to the filter. Without this, extreme env+LFO
+            // modulation can push fc past Nyquist; FastTan saves us internally
+            // but the filter then runs deep in non-linear territory with no
+            // meaningful "cutoff" semantics.
+            float cutoffMaxHz = srf * 0.45f;
+
+            // Hoist post-mix selectors out of the per-sample loop. Configure
+            // is cheap when the parameter hasn't changed (single int compare);
+            // when it has, mode-dependent coefficients are computed once and
+            // cached so the hot Process loop has no switch-on-mode logic.
+            _hpf.Configure(hpfPosL);
+            _chorus.Configure(chorusModeL);
+
             bool nonSilent = false;
 
             for (int i = 0; i < numSamples; i++)
@@ -312,6 +326,9 @@ namespace PedalJuno106
                     float envOct = envAmt01 * env * envSign * 6f;     // ≤ 6 oct
                     float lfoOct = lfoCut01 * lfoOut * 4f;            // ≤ ±4 oct
                     float cutoffHz = DspMath.FastPow2(baseCutOct + keyOct + envOct + lfoOct);
+                    // Explicit clamp before the filter — see cutoffMaxHz comment above.
+                    if (cutoffHz < 20f)              cutoffHz = 20f;
+                    else if (cutoffHz > cutoffMaxHz) cutoffHz = cutoffMaxHz;
 
                     // DCO frequency with pitch modulation (DCO LFO Depth)
                     // Juno vibrato range: max depth = ±1 semitone (≈ ±100 cents).
@@ -375,10 +392,12 @@ namespace PedalJuno106
                 // Master gain
                 mix *= vcaLevel;
 
-                // HPF (mono, pre-chorus) → Chorus (mono in, stereo out)
-                float monoHpf = _hpf.ProcessMono(hpfPosL, mix);
+                // HPF (mono, pre-chorus) → Chorus (mono in, stereo out).
+                // Both were Configured once before this loop — the per-sample
+                // calls just run their math against the cached coefficients.
+                float monoHpf = _hpf.ProcessMono(mix);
                 float outL = 0f, outR = 0f;
-                _chorus.Process(chorusModeL, monoHpf, ref outL, ref outR);
+                _chorus.Process(monoHpf, ref outL, ref outR);
 
                 if (outL != 0f || outR != 0f) nonSilent = true;
 
