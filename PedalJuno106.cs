@@ -299,6 +299,11 @@ namespace PedalJuno106
                     var voice = _voices[v];
                     if (!voice.Active) continue;
 
+                    // Per-sample anti-click ramp. May fire a deferred
+                    // trigger (in which case voice state has just been
+                    // reset and AntiClick=0 starting its fade-in).
+                    voice.TickAntiClick();
+
                     // Envelope tick
                     float env = voice.Env.Process();
 
@@ -332,7 +337,15 @@ namespace PedalJuno106
                                                   subLvl, noiseLvl, srf);
                     float filtered = voice.Filter.Process(dco, cutoffHz, resonance01);
 
-                    // VCA: env-shaped or binary gate
+                    // VCA shape:
+                    //   Env mode  → vca = env, AntiClick stays at 1 (set by
+                    //                Trigger; not touched here).
+                    //   Gate mode → vca = 1, AntiClickTarget driven by env
+                    //                stage so the binary on/off becomes a
+                    //                smooth ~1.3 ms ramp. We don't override
+                    //                AntiClickTarget while a deferred trigger
+                    //                is in flight (its fade-out target of 0
+                    //                must win).
                     float vca;
                     if (vcaModeL == 0)
                     {
@@ -340,13 +353,21 @@ namespace PedalJuno106
                     }
                     else
                     {
-                        // Gate: 1 while not in Release/Idle, 0 otherwise
-                        vca = (voice.Env.Stage == EnvStage.Release ||
-                               voice.Env.Stage == EnvStage.Idle) ? 0f : 1f;
+                        vca = 1f;
+                        if (!voice.HasPendingTrigger)
+                        {
+                            bool gateOn = !(voice.Env.Stage == EnvStage.Release ||
+                                            voice.Env.Stage == EnvStage.Idle);
+                            voice.AntiClickTarget = gateOn ? 1f : 0f;
+                        }
                     }
-                    mix += filtered * vca;
+                    mix += filtered * vca * voice.AntiClick;
 
-                    // Free voice when envelope has fully decayed
+                    // Free voice when envelope has fully decayed. AntiClick
+                    // doesn't need to be in the check: in Env mode it stays
+                    // at 1 (output is already 0 because env is 0); in Gate
+                    // mode AntiClick has long since reached 0 by the time
+                    // env hits Idle (fade is ~1.3 ms vs env release ≥5 ms).
                     if (voice.Env.Stage == EnvStage.Idle && voice.Env.Level == 0f)
                         voice.Active = false;
                 }

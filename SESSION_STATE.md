@@ -162,6 +162,30 @@ Three modes:
 The latter two are wide-but-musical — likely the obvious tuning
 targets when A/B'ing against reference recordings.
 
+**Anti-click envelope (per voice)** — fade gain (0..1) multiplied into the
+voice's output. Ramps to its target by `1/64` per sample (~1.3 ms at
+48 kHz). Three roles:
+
+1. *Retrigger of audible voice* — Voice.Trigger sees the voice is still
+   sounding, stages a pending trigger, sets fade target to 0. Once
+   AntiClick hits zero, TickAntiClick runs the actual DoTrigger (resets
+   DCO/filter/env), sets target back to 1 to fade in. Total perceived
+   gap ~2 ms — inaudible but completely click-free. PedalTracker §4.2
+   pattern.
+2. *Initial transient on note-on* — fresh trigger starts at AntiClick=0
+   and ramps to 1. Masks any DC offset from filter init or DCO phase-0
+   mismatch.
+3. *Gate-mode VCA smoothing* — in Gate mode the work loop drives
+   AntiClickTarget from env stage so the binary 0/1 transitions become
+   smooth ~1.3 ms ramps. Gate-mode `vca = 1` constant; AntiClick is
+   the gate envelope. Env mode leaves AntiClickTarget alone — env
+   itself shapes the sound.
+
+NoteOff cancels any pending retrigger but lets the in-flight fade-out
+continue (the user pressed and released a key faster than the deferred
+trigger could land — keep going to silence rather than start a fresh
+note).
+
 **Sample format** — Generators write directly to ±32768 (PedalComp §1).
 All internal DSP is at ±1.0 normalised; the final scale-and-emit happens
 at the bottom of `Work()`.
