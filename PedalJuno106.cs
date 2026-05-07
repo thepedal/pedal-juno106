@@ -51,6 +51,14 @@ namespace PedalJuno106
         int _cachedSustain = -1;
         int _cachedRelease = -1;
 
+        // ── Transport state ────────────────────────────────────────────────────
+        // We poll IBuzz.Playing each Work() call and detect the falling edge.
+        // When the user presses Stop, ReBuzz pauses the pattern engine (no more
+        // setter calls) but keeps invoking Work() so downstream machines can
+        // render their tails. Without this poll, sustained notes ring forever
+        // because no NoteOff arrives. PedalTracker §3 pattern.
+        bool _wasPlaying;
+
         // ── Per-voice drift (analog-like detuning) ─────────────────────────────
         // Static per-voice cent offsets — small constant detune unique to each
         // voice. Hand-tuned distribution that sums to zero so the chord average
@@ -251,6 +259,56 @@ namespace PedalJuno106
         }
 
         // ──────────────────────────────────────────────────────────────────────
+        // Transport handling (PedalTracker §3) — detect Stop edge and silence
+        // any sustained voices. Without this, voices in their sustain phase
+        // ring forever after the user presses Stop because the pattern engine
+        // pauses without sending NoteOff events.
+        // ──────────────────────────────────────────────────────────────────────
+
+        void CheckTransport()
+        {
+            bool nowPlaying;
+            try
+            {
+                // host.Machine.Graph.Buzz is the IBuzz instance (Core §10).
+                nowPlaying = host?.Machine?.Graph?.Buzz?.Playing ?? false;
+            }
+            catch
+            {
+                // Never break audio on a poll fail — assume no change.
+                nowPlaying = _wasPlaying;
+            }
+
+            if (_wasPlaying && !nowPlaying)
+                StopAllVoices();
+
+            _wasPlaying = nowPlaying;
+        }
+
+        void StopAllVoices()
+        {
+            // Discard any pattern events the engine queued in the same tick
+            // as the Stop edge — they're stale.
+            for (int t = 0; t < VOICE_COUNT; t++)
+            {
+                _hasNewNote[t]  = false;
+                _pendingNote[t] = 0;
+            }
+
+            // For every active voice: send NoteOff (env enters Release so the
+            // voice eventually reaches Idle and frees) AND force the anti-click
+            // fade target to 0 (audible silence in ~1.3 ms regardless of the
+            // patch's release time — Stop should be immediate to the listener).
+            for (int v = 0; v < VOICE_COUNT; v++)
+            {
+                var voice = _voices[v];
+                if (!voice.Active) continue;
+                voice.NoteOff();              // also clears HasPendingTrigger
+                voice.AntiClickTarget = 0f;
+            }
+        }
+
+        // ──────────────────────────────────────────────────────────────────────
         // Audio loop — ReBuzz calls this once per audio buffer (≤256 samples).
         // ──────────────────────────────────────────────────────────────────────
 
@@ -267,6 +325,11 @@ namespace PedalJuno106
                 for (int v = 0; v < VOICE_COUNT; v++) _voices[v].SetSampleRate(sr);
                 _cachedAttack = -1;   // force ADSR recompute
             }
+
+            // ── Transport: detect Stop edge and silence held voices ────────────
+            //    Done before ProcessPendingNotes so any pattern events queued
+            //    in the same tick as a Stop edge are correctly discarded. ──────
+            CheckTransport();
 
             // ── Drain any pending note events from this tick.
             //    NOTE: ADSR update must precede this so freshly-triggered

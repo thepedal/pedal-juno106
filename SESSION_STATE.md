@@ -210,6 +210,15 @@ once per Work() block via lowpass-filtered LCG noise; per-sample cost
 is one extra add into the existing `pitchOct` chain — no new FastPow2
 calls. Drift evolves continuously regardless of key state.
 
+**Transport handling** — IBuzz.Playing is polled at the top of every
+Work() call. On the falling edge (was playing, now not), all active
+voices receive NoteOff (env enters Release so they eventually free)
+plus AntiClickTarget=0 (forces audible silence in ~1.3 ms regardless
+of the patch's release time). Pending pattern events queued in the
+same tick as the Stop edge are discarded as stale. Without this poll,
+sustained notes ring forever after the user presses Stop because the
+pattern engine pauses without sending NoteOff. PedalTracker §3 pattern.
+
 **Sample format** — Generators write directly to ±32768 (PedalComp §1).
 All internal DSP is at ±1.0 normalised; the final scale-and-emit happens
 at the bottom of `Work()`.
