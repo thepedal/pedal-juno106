@@ -51,12 +51,34 @@ namespace PedalJuno106
         int _cachedSustain = -1;
         int _cachedRelease = -1;
 
+        // ── Per-voice drift (analog-like detuning) ─────────────────────────────
+        // Static per-voice cent offsets — small constant detune unique to each
+        // voice. Hand-tuned distribution that sums to zero so the chord average
+        // stays in tune. Tuned for "tightly tuned vintage" — chord stacks
+        // sound clean but with subtle analog character, not detuned.
+        static readonly float[] _staticDetuneCents = {
+            -0.8f, +0.2f, -0.4f, +0.6f, -0.1f, +0.5f
+        };
+        // Distinct LCG seeds so each voice's slow random walk evolves
+        // independently. Any non-zero, non-equal values work.
+        static readonly uint[] _voiceDriftSeeds = {
+            0x12345678u, 0x9ABCDEF0u, 0x13579BDFu,
+            0x2468ACE0u, 0x1A2B3C4Du, 0xFEDCBA98u
+        };
+        const float DriftTimeConstSec = 2.0f;   // ~2-second wander
+        const float DriftWanderCents  = 0.5f;   // ±0.5 cent random-walk amplitude
+
         public PedalJuno106Machine(IBuzzMachineHost host)
         {
             this.host = host;
             _voices = new Voice[VOICE_COUNT];
             for (int i = 0; i < VOICE_COUNT; i++)
+            {
                 _voices[i] = new Voice();
+                _voices[i].StaticDetuneCents = _staticDetuneCents[i];
+                _voices[i].DriftSeed         = _voiceDriftSeeds[i];
+                _voices[i].DriftOctaves      = _staticDetuneCents[i] * (1f / 1200f);
+            }
             _hasNewNote  = new bool[VOICE_COUNT];
             _pendingNote = new byte[VOICE_COUNT];
         }
@@ -299,6 +321,14 @@ namespace PedalJuno106
             _hpf.Configure(hpfPosL);
             _chorus.Configure(chorusModeL);
 
+            // Per-voice drift — slow analog-like wander, updated once per
+            // Work() block. Coef derived from block size so the time constant
+            // stays ~constant across whatever block size ReBuzz is using.
+            float blockTimeSec = numSamples / srf;
+            float driftCoef    = 1f - MathF.Exp(-blockTimeSec / DriftTimeConstSec);
+            for (int v = 0; v < VOICE_COUNT; v++)
+                _voices[v].UpdateDrift(driftCoef, DriftWanderCents);
+
             bool nonSilent = false;
 
             for (int i = 0; i < numSamples; i++)
@@ -330,10 +360,12 @@ namespace PedalJuno106
                     if (cutoffHz < 20f)              cutoffHz = 20f;
                     else if (cutoffHz > cutoffMaxHz) cutoffHz = cutoffMaxHz;
 
-                    // DCO frequency with pitch modulation (DCO LFO Depth)
+                    // DCO frequency with pitch modulation (DCO LFO Depth) +
+                    // per-voice drift (static detune + slow analog-like wander).
+                    // Both folded into pitchOct so the existing FastPow2 carries
+                    // them — one extra add per sample, no extra transcendentals.
                     // Juno vibrato range: max depth = ±1 semitone (≈ ±100 cents).
-                    // Going wider sounds like a pitch-bend FX rather than vibrato.
-                    float pitchOct = dcoLfoDepth * lfoOut * (1f / 12f);
+                    float pitchOct = dcoLfoDepth * lfoOut * (1f / 12f) + voice.DriftOctaves;
                     float freqHz   = voice.Frequency * rangeFactor *
                                      DspMath.FastPow2(pitchOct);
 

@@ -200,6 +200,16 @@ continue (the user pressed and released a key faster than the deferred
 trigger could land — keep going to silence rather than start a fresh
 note).
 
+**Per-voice drift** (analog-like detuning) — each voice has a small static
+cent offset (component-tolerance simulation, max ±0.8 cents, hand-tuned
+to sum to zero across the 6 voices) plus a slow random walk on top
+(±0.5 cents, ~2 second time constant). Tuned for "tightly tuned vintage"
+character — chord stacks stay clean rather than sounding detuned, but
+single notes and held chords still have subtle analog motion. Updated
+once per Work() block via lowpass-filtered LCG noise; per-sample cost
+is one extra add into the existing `pitchOct` chain — no new FastPow2
+calls. Drift evolves continuously regardless of key state.
+
 **Sample format** — Generators write directly to ±32768 (PedalComp §1).
 All internal DSP is at ±1.0 normalised; the final scale-and-emit happens
 at the bottom of `Work()`.

@@ -47,6 +47,20 @@ namespace PedalJuno106
         public bool  HasPendingTrigger;    // a Trigger() was deferred during a fade-out
         public byte  PendingNote;          // the note to actually trigger when fade hits 0
 
+        // ── Per-voice drift (analog-like detuning) ────────────────────────────
+        // StaticDetuneCents is a small constant per-voice offset (component
+        // tolerance) — set once at construction, never changes.
+        // DriftCents is a slow random walk on top, lowpass-filtered noise
+        // updated once per Work() block. Time constant ~2 s so the wander is
+        // genuinely slow (analog-like, not LFO-like).
+        // DriftOctaves is the combined offset converted once per block, added
+        // straight into the existing pitchOct add chain in the per-sample
+        // loop — costs one extra add per sample, no extra FastPow2 calls.
+        public float StaticDetuneCents;    // immutable per voice
+        public float DriftCents;           // slow random-walk state
+        public float DriftOctaves;         // (StaticDetuneCents + DriftCents) / 1200, cached per block
+        public uint  DriftSeed;            // per-voice LCG seed
+
         public void SetSampleRate(float sr)
         {
             Env.SetSampleRate(sr);
@@ -64,6 +78,32 @@ namespace PedalJuno106
             AntiClick = 0f;
             AntiClickTarget = 0f;
             HasPendingTrigger = false;
+            // Note: StaticDetuneCents, DriftCents, DriftSeed deliberately
+            // not reset — drift is an analog-like effect that persists across
+            // notes (a real Juno DCO doesn't re-tune itself on each key).
+        }
+
+        /// <summary>
+        /// Advance the slow drift random walk by one block-rate step, then
+        /// recompute the cached DriftOctaves used by the per-sample loop.
+        ///   coef         : lowpass coefficient for the random walk
+        ///                  (≈ blockTimeSec / driftTimeConstantSec)
+        ///   wanderCents  : range of the random kick (peak-to-peak ≈ 2× this)
+        /// Always called for every voice every block, including silent ones —
+        /// drift evolves continuously in real hardware, regardless of key state.
+        /// </summary>
+        public void UpdateDrift(float coef, float wanderCents)
+        {
+            // LCG step, signed value in approximately [-1, 1)
+            DriftSeed = DriftSeed * 1664525u + 1013904223u;
+            float rnd = (DriftSeed * (1f / 2147483648f)) - 1f;
+
+            // One-pole lowpass on white noise — produces slowly-wandering output
+            // bounded roughly by ±wanderCents.
+            DriftCents += coef * (rnd * wanderCents - DriftCents);
+
+            // Cache the combined detune as octaves for the per-sample loop.
+            DriftOctaves = (StaticDetuneCents + DriftCents) * (1f / 1200f);
         }
 
         /// <summary>
