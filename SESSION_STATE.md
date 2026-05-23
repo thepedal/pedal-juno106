@@ -232,17 +232,30 @@ at the bottom of `Work()`.
 `machine.parametersChanged` is keyed by parameter, not (parameter, track).
 When two pattern tracks fire the same note parameter on the same row,
 the second write overwrites the first dictionary entry — losing one
-voice's note delivery. Workaround: from inside `SetNote`, read the
-parameter's `pvalues` (`ConcurrentDictionary<int,int>`) via reflection
-and recover any sibling tracks whose setter was dropped.
+voice's note delivery (symptom: only the highest-numbered track plays,
+no chords). Workaround: from inside `SetNote`, read the parameter's
+private `pvalues` via reflection and recover any sibling tracks whose
+setter was dropped.
 
 In Pedal Juno106:
-- `_ownNoteParam` and `_ownNotePValues` cached after first `SetNote` call
-- `TryInitNotePolling` does lazy init via reflection; `_polledInit`
-  resets if `ParameterGroups` not ready (lazy retry per Core §15)
-- `PollOtherTracks` runs from inside `SetNote` after staging the
-  fired track's pending note — captures the entire row's data
-  regardless of which setter Tick() iteration runs first
+- `_ownNoteParam` cached + `_readPValue` (a `Func<int,int>`) built after
+  first `SetNote` call
+- `TryInitNotePolling` does lazy init; `_polledInit` only commits once
+  `ParameterGroups` is ready (lazy retry per Core §15)
+- `BuildPValueReader` detects the `pvalues` backing shape at RUNTIME and
+  closes over a reader — never a bare `as` cast
+- `PollOtherTracks` calls `_readPValue(t)` for sibling tracks, runs from
+  inside `SetNote` after staging the fired track's pending note
+
+**CROSS-BUILD HAZARD (PedalTracker §16) — fixed in v1.5.** ReBuzz changed
+`ParameterCore.pvalues` from `ConcurrentDictionary<int,int>` (≤1818) to
+`int[256]` (1827). The old code did `as ConcurrentDictionary<int,int>`,
+which silently returned null on the array type — no exception — killing
+all chord playback (only the last-written track survived). `BuildPValueReader`
+now pattern-matches `int[]` / `ConcurrentDictionary<int,int>` /
+`IDictionary` and returns the right reader. Same DLL works on both builds.
+Any future reflection into ReBuzz internals MUST detect shape at runtime,
+never assume type.
 
 ### ADSR coefficient caching (per Voice via shared call)
 

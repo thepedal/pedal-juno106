@@ -41,7 +41,12 @@ namespace PedalJuno106
 
         // ── Multi-track Note polling (Core §14) ────────────────────────────────
         IParameter _ownNoteParam;
-        ConcurrentDictionary<int, int> _ownNotePValues;
+        // Reader closing over ParameterCore.pvalues, whatever its backing shape.
+        // ReBuzz ≤1818 used ConcurrentDictionary<int,int>; 1827 changed it to
+        // int[256]. A bare `as` cast silently nulls on the wrong shape and kills
+        // all multi-track playback (PedalTracker §16). The reader detects the
+        // shape once and closes over it.
+        Func<int, int> _readPValue;
         bool _polledInit;
 
         // ── Coefficient caches ─────────────────────────────────────────────────
@@ -213,35 +218,60 @@ namespace PedalJuno106
         void TryInitNotePolling()
         {
             if (_polledInit) return;
-            _polledInit = true;        // try only once even if it fails
 
             try
             {
                 var groups = host?.Machine?.ParameterGroups;
-                if (groups == null || groups.Count < 3) { _polledInit = false; return; }
+                if (groups == null || groups.Count < 3) return;   // not ready — retry next call
+
+                _polledInit = true;        // groups ready; commit to one setup attempt
 
                 // Track group is index 2 in standard Buzz layout.
                 _ownNoteParam = groups[2].Parameters
                     .FirstOrDefault(p => p?.Type == ParameterType.Note);
                 if (_ownNoteParam == null) return;
 
-                // Reflect on ParameterCore.pvalues (ConcurrentDictionary<int,int>).
-                var fi = _ownNoteParam.GetType().GetField("pvalues",
-                    BindingFlags.NonPublic | BindingFlags.Instance);
-                _ownNotePValues = fi?.GetValue(_ownNoteParam)
-                    as ConcurrentDictionary<int, int>;
+                _readPValue = BuildPValueReader(_ownNoteParam);
             }
             catch
             {
-                // Reflection failure is non-fatal; we just lose chord recovery.
-                _ownNotePValues = null;
+                // Reflection failure is non-fatal; we just lose chord recovery
+                // (degrades to last-track-only, machine keeps running).
+                _readPValue = null;
             }
+        }
+
+        // Detect the backing shape of ParameterCore.pvalues at runtime and
+        // return a reader closing over it. Never use a bare `as` cast — that
+        // silently nulls when the field type changes between ReBuzz builds and
+        // kills all multi-track playback. PedalTracker §16.3.
+        //   ReBuzz ≤1818: ConcurrentDictionary<int,int>
+        //   ReBuzz  1827: int[256] (fixed, never reallocated — safe to close over)
+        static Func<int, int> BuildPValueReader(IParameter p)
+        {
+            var fi = p.GetType().GetField("pvalues",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            if (fi == null) return null;
+            object raw = fi.GetValue(p);
+            if (raw == null) return null;
+            int noValue = p.NoValue;
+
+            if (raw is int[] arr)
+                return track => ((uint)track < (uint)arr.Length) ? arr[track] : noValue;
+
+            if (raw is ConcurrentDictionary<int, int> dict)
+                return track => dict.TryGetValue(track, out int v) ? v : noValue;
+
+            if (raw is System.Collections.IDictionary idict)   // last resort
+                return track => idict.Contains(track) ? (int)idict[track] : noValue;
+
+            return null;
         }
 
         void PollOtherTracks(int firedTrack)
         {
-            if (_ownNotePValues == null) TryInitNotePolling();
-            if (_ownNotePValues == null) return;
+            if (_readPValue == null) TryInitNotePolling();
+            if (_readPValue == null) return;
 
             int noVal = _ownNoteParam.NoValue;   // 0 for Note type
             for (int t = 0; t < VOICE_COUNT; t++)
@@ -249,8 +279,8 @@ namespace PedalJuno106
                 if (t == firedTrack) continue;
                 if (_hasNewNote[t]) continue;        // setter already fired this tick
 
-                int pv;
-                if (_ownNotePValues.TryGetValue(t, out pv) && pv != noVal && pv != 0)
+                int pv = _readPValue(t);
+                if (pv != noVal && pv != 0)
                 {
                     _pendingNote[t] = (byte)pv;
                     _hasNewNote[t]  = true;
